@@ -1,0 +1,67 @@
+package com.bluedon.kafka
+
+import java.io.InputStream
+import java.util.Properties
+
+import com.bluedon.dataMatch.NTADataProcess
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.streaming.{Seconds, StreamingContext}
+
+/**
+  * Author: Dlin
+  * Date:2017/10/30 11:06
+  * Descripe:
+  */
+object NTADataReceiveServer {
+  def main(args: Array[String]): Unit = {
+      try{
+        val properties: Properties = new Properties()
+        val inStream: InputStream = this.getClass.getResourceAsStream("/manage.properties")
+        properties.load(inStream)
+        //消费窗口最大
+        val times:Int =properties.getProperty("ntaflow.time").toInt
+        val spark = getSparkSession(properties)
+        //NTADataProcess
+        val sparkContext: SparkContext = spark.sparkContext
+        val streaming: StreamingContext = new StreamingContext(sparkContext,Seconds(times))
+        val ntadataProcess =new NTADataProcess()
+        ntadataProcess.ntaflowProcess(spark,streaming,properties)
+        streaming.start()
+        streaming.awaitTermination()
+      }catch{
+        case e:Exception=>{
+          println("NTADataClearnServer 抛异常")
+          e.printStackTrace()
+        }
+      }
+  }
+  def getSparkSession(properties: Properties): SparkSession ={
+    val maxRatePerPartition:Int=properties.getProperty("ntaflow.maxRatePerPartition").toInt
+    //是否开启最优 true
+    val backpressure:String = properties.getProperty("ntaflow.backpressure")
+
+    val masterUrl = properties.getProperty("spark.master.url")
+    val esurl=properties.getProperty("es.nodes")
+    val esport=properties.getProperty("es.port")
+    val spark = SparkSession
+      .builder()
+      // .master(masterUrl)
+      .master("local")
+      .appName("NTADataClearnServer")
+      .config("spark.some.config.option", "some-value")
+      .config("spark.streaming.unpersist",true)  // 智能地去持久化
+      .config("spark.streaming.stopGracefullyOnShutdown","true")  // 优雅的停止服务
+      .config("spark.streaming.backpressure.enabled",backpressure)      //开启后spark自动根据系统负载选择最优消费速率
+      .config("spark.streaming.backpressure.initialRate",20000)      //限制第一次批处理应该消费的数据，因为程序冷启动队列里面有大量积压，防止第一次全部读取，造成系统阻塞
+      .config("spark.streaming.kafka.maxRatePerPartition",maxRatePerPartition)      //限制每秒每个消费线程读取每个kafka分区最大的数据量
+      .config("spark.streaming.receiver.maxRate",20000)      //设置每次接收的最大数量
+      .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")   //使用Kryo序列化
+      .config("es.index.auto.create", "true")
+      .config("es.nodes.wan.only", "true")
+      .config("es.nodes",esurl)
+      .config("es.port",esport)
+      .getOrCreate()
+    spark
+  }
+}

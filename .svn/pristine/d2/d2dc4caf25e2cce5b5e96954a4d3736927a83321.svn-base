@@ -1,0 +1,177 @@
+package com.bluedon.dataMatch
+
+import java.text.SimpleDateFormat
+import java.util
+import java.util.{Date, Properties, UUID}
+
+import org.apache.kafka.common.serialization.StringDeserializer
+import org.json4s.jackson.Serialization
+import org.elasticsearch.spark.sql._
+import com.bluedon.esinterface.config.ESClient
+import com.bluedon.esinterface.index.IndexUtils
+import com.bluedon.kafka.{Netflow}
+import com.bluedon.utils.JSONtoLowerTools
+import net.sf.json.JSONObject
+import org.apache.kafka.clients.consumer.ConsumerRecord
+import org.apache.spark.sql.{DataFrame, SQLContext, SparkSession}
+import org.apache.spark.streaming.StreamingContext
+import org.apache.spark.streaming.dstream.InputDStream
+import org.apache.spark.streaming.kafka010.ConsumerStrategies.Subscribe
+import org.apache.spark.streaming.kafka010.KafkaUtils
+import org.apache.spark.streaming.kafka010.LocationStrategies.PreferConsistent
+import org.elasticsearch.client.Client
+import org.json4s.ShortTypeHints
+import org.json4s.jackson.JsonMethods.parse
+
+import scala.collection.mutable
+
+/**
+  * Author: Dlin
+  * Date:2017/10/30 11:19
+  * Descripe:
+  */
+class NTADataProcess extends Serializable{
+
+  /**
+    * NTA数据初次入库库
+    * @param spark
+    * @param ssc
+    * @param properties
+    */
+  def ntaflowProcess(spark:SparkSession, ssc:StreamingContext,properties:Properties): Unit ={
+
+
+    val zkQuorumRoot = properties.getProperty("zookeeper.host")+":" + properties.getProperty("zookeeper.port")
+    val zkQuorumURL = spark.sparkContext.broadcast(zkQuorumRoot)
+    val zkQuorumKafka = properties.getProperty("zookeeper.kafka.host")+":" + properties.getProperty("zookeeper.port")
+
+    val brokers = properties.getProperty("kafka.host.list")
+
+    val topics = Set(properties.getProperty("kafka.ntaflow.topic")).toSet
+
+    val kafkaParams = Map[String, String](
+      // "metadata.broker.list"        -> brokers,
+      "bootstrap.servers"           -> brokers,
+      "group.id"                    -> "ntaflowgroup",
+      "auto.commit.interval.ms"     -> "1000",
+      "key.deserializer"            -> "org.apache.kafka.common.serialization.StringDeserializer",
+      "value.deserializer"          -> "org.apache.kafka.common.serialization.StringDeserializer",
+      "auto.offset.reset"           -> "latest",
+      "enable.auto.commit"          -> "true"
+    )
+    val format: SimpleDateFormat = new SimpleDateFormat("yyyyMMdd")
+    val ntaflowCache: InputDStream[ConsumerRecord[String, String]] = KafkaUtils.createDirectStream[String, String]( ssc, PreferConsistent, Subscribe[String, String](topics, kafkaParams) )
+
+    println("============================ntaflow开始处理===========================")
+    ntaflowCache.foreachRDD(ntaflowlines=>{
+      val date: Date =new java.util.Date()
+      println("----------------------Timestamp:"+date.getTime+"----------------------------------")
+      var lists= new util.ArrayList[String]()
+      try{
+        ntaflowlines.foreachPartition(ntaflowline=>{
+          val client: Client = ESClient.esClient()
+          while(ntaflowline.hasNext) {
+            var   seq = Seq[mutable.Map[String,Object]]()
+            var flow: ConsumerRecord[String, String] = ntaflowline.next()
+            if(flow != null && flow.value() != null && !flow.value().trim.equals("")){
+              var flows: String = flow.value()
+              val index=flows.indexOf(":")
+              val head = flows.substring(0,index)
+              val data = flows.substring(index+1)
+              caseData(head,data,client,date,format)
+            }
+          }
+        })
+      }catch {
+        case e:Exception=>{
+          println("#####发生异常!")
+          e.printStackTrace()
+        }
+        case e:Exception=>{
+          e.printStackTrace()
+        }
+      }
+    })
+  }
+
+  /**
+    * 模式匹配
+    * @param str
+    * @param data
+    * @param client
+    */
+  def caseData(str:String,data:String,client:Client,date: Date,format: SimpleDateFormat):Unit= {
+    str match {
+      case "tcp" => tcpandudpProcess(str, data, client,date,format)
+      case "dns" => dnsProcess(str, data, client,date,format)
+      case "http" => httpProcess(str, data, client,date,format)
+      case "ftp" => ftpProcess(str, data, client,date,format)
+      case "smtp" => smtpProcess(str, data, client,date,format)
+      case "icmp" => icmpProcess(str, data, client,date,format)
+      case _ => println("case 异常")
+    }
+  }
+
+  /** 传输层
+    * netflow /tcp udp
+    * @param str
+    * @param data
+    * @param client
+    */
+  def tcpandudpProcess(str:String,data:String,client:Client,date: Date,format: SimpleDateFormat): Unit ={
+
+    val jsonobject: JSONObject = JSONObject.fromObject(data)
+    IndexUtils.addIndexData(client,str,str,jsonobject.toString)
+  }
+  /** 应用层
+    * http 数据
+    * @param str
+    * @param data
+    * @param client
+    */
+  def httpProcess(str:String,data:String,client:Client,date: Date,format: SimpleDateFormat): Unit ={
+
+      //IndexUtils.addIndexData()
+  }
+
+  /** 应用层
+    * ftp
+    * @param str
+    * @param data
+    * @param client
+    */
+  def ftpProcess(str:String,data:String,client:Client,date: Date,format: SimpleDateFormat): Unit ={
+
+  }
+
+  /** 应用层
+    * smtp
+    * @param str
+    * @param data
+    * @param client
+    */
+  def smtpProcess(str:String,data:String,client:Client,date: Date,format: SimpleDateFormat): Unit ={
+
+  }
+  /** 应用层
+    * dns 数据
+    * @param str
+    * @param data
+    * @param client
+    */
+  def dnsProcess(str:String,data:String,client:Client,date: Date,format: SimpleDateFormat): Unit ={
+
+  }
+  /** 网络层
+    * smtp
+    * @param str
+    * @param data
+    * @param client
+    */
+  def icmpProcess(str:String,data:String,client:Client,date: Date,format: SimpleDateFormat): Unit ={
+
+  }
+
+
+
+}

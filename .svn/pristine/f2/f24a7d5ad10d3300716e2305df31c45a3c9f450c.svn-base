@@ -1,0 +1,75 @@
+package com.bluedon.kafka
+
+import java.util.{Date, Properties}
+
+import com.bluedon.dataMatch.RelationEventMatch
+import com.bluedon.utils.{BCVarUtil, RuleUtils}
+import net.sf.json.JSONArray
+import org.apache.spark.SparkContext
+import org.apache.spark.broadcast.Broadcast
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.streaming.{Seconds, StreamingContext}
+import redis.clients.jedis.Jedis
+
+/**
+  * Author: Dlin
+  * Date:2017/9/11 15:17
+  * Descripe:
+  */
+object RelationAnalyzeServer {
+      def main(args:Array[String]):Unit={
+        try{
+          //加载配置文件
+          val properties = new Properties()
+          properties.load(this.getClass.getResourceAsStream("/manage.properties"))
+          val url:String = properties.getProperty("aplication.sql.url")
+          val username:String = properties.getProperty("aplication.sql.username")
+          val password:String = properties.getProperty("aplication.sql.password")
+          val redisHost:String = properties.getProperty("redis.host")
+          val masterUrl = properties.getProperty("spark.master.url")
+          val spark = SparkSession
+              .builder()
+              .master(masterUrl)
+              //.master("local")
+              .appName("RelationServerApp")
+              .config("spark.some.config.option","some-value")
+              .config("spark.streaming.unpersist","true") //去持久化
+              .config("spark.streaming.stopGracefullyOnShutdown","true") //停止服务
+              .config("spark.streaming.backpressure.enabled","true") //开启后spark自动根据系统负载选择最优消费速率
+              .config("spark.streaming.backpressure.initialRate",2000)   //第一次消费速率 系统存在挤压
+              .config("spark.streaming.kafka.maxRatePerPartition",1200)  //读取kafka每个分区的最大数量
+              .config("spark.streaming.receiver.maxRate",2000)  //每次接受最大速率
+              .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") //使用kryo序列化
+              .config("spark.shuffle.file.buffer", "64k")
+              .getOrCreate()
+          val jedis:Jedis = new Jedis(redisHost,6379)
+          jedis.auth("123456");
+          val ruleUtils = new RuleUtils
+          var allRuleMapBC:Map[String, JSONArray] = ruleUtils.getAllRuleMapByRedis(jedis,url,username,password)
+          var dataCheckMapBC:Map[String, JSONArray] = ruleUtils.getCheckDataMapByRedis(jedis,url,username,password)
+          //获取告警规则
+          var alarmRuleMapBC:Map[String, JSONArray] = ruleUtils.getAlarmRuleMapByRedis(jedis,url,username,password)
+          jedis.close()
+
+          val ruleMap = Map[String,Map[String, JSONArray]]("allRuleMapBC" -> allRuleMapBC,"dataCheckMapBC" -> dataCheckMapBC,"alarmRuleMapBC" -> alarmRuleMapBC)
+          var ruleMapBC:Broadcast[Map[String, Map[String, JSONArray]]] = spark.sparkContext.broadcast(ruleMap)
+          var bcVarUtil:BCVarUtil = new BCVarUtil()
+          val ruleVarBC = scala.collection.mutable.Map[String,Broadcast[Map[String, Map[String, JSONArray]]]] ("ruleBC"->ruleMapBC)
+          bcVarUtil.setBCMap(ruleVarBC)
+          val time = new Date()
+          bcVarUtil.setRefreshTime(time.getTime)
+
+          val sparkContext:SparkContext = spark.sparkContext
+          val sparkStream = new StreamingContext(sparkContext,Seconds(5))
+          val relation = new RelationEventMatch()
+          relation.relationProcess(spark,sparkStream,properties,bcVarUtil)
+          sparkStream.start()
+          sparkStream.awaitTermination()
+        }catch{
+          case e:Exception =>{
+            e.printStackTrace()
+            println("关联事件抛异常")
+          }
+        }
+      }
+}
